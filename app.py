@@ -190,7 +190,7 @@ def run_lime(model, input_scaled, bg_data, feature_names, class_names, pred_clas
 
 
 # SHAP helper
-def run_shap(model, input_scaled, bg_data, feature_names, model_name):
+def run_shap(model, input_scaled, bg_data, feature_names, model_name, pred_class_idx):
     try:
         import shap
     except ImportError:
@@ -203,21 +203,32 @@ def run_shap(model, input_scaled, bg_data, feature_names, model_name):
                 model, bg_data.values, feature_perturbation="interventional"
             )
             shap_vals = explainer.shap_values(input_scaled)
-            vals = shap_vals[0] if isinstance(shap_vals, list) else shap_vals
         else:
             explainer = shap.KernelExplainer(
                 model.predict_proba, shap.sample(bg_data.values, 50)
             )
             shap_vals = explainer.shap_values(input_scaled, nsamples=100)
-            vals = shap_vals[0][0] if isinstance(shap_vals, list) else shap_vals[0]
+
+        # Normalise to 1-D array of shape (n_features,) for the predicted class
+        if isinstance(shap_vals, list):
+            # list of n_classes arrays, each (n_samples, n_features)
+            vals = np.array(shap_vals[pred_class_idx]).flatten()
+        elif shap_vals.ndim == 3:
+            # (n_samples, n_features, n_classes)
+            vals = shap_vals[0, :, pred_class_idx]
+        else:
+            # (n_samples, n_features) — binary / single output
+            vals = shap_vals[0]
     except Exception as e:
         return None, f"SHAP error: {e}"
+
+    vals = np.array(vals).flatten()
+    sorted_idx = np.argsort(np.abs(vals))
 
     fig, ax = plt.subplots(figsize=(7, 4))
     fig.patch.set_facecolor("#FFFFFF")
     ax.set_facecolor("#F7F3EB")
 
-    sorted_idx = np.argsort(np.abs(vals))
     colors = ["#C1121F" if v < 0 else "#2D6A4F" for v in vals[sorted_idx]]
     ax.barh(
         [feature_names[i].strip() for i in sorted_idx],
@@ -358,12 +369,46 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
+    feat_help = {
+        " Time":
+            "Time elapsed in the sensor network round (seconds). "
+            "Higher values = later in the network lifecycle.",
+        " Is_CH":
+            "Is this node acting as a Cluster Head? "
+            "A Cluster Head collects data from nearby nodes and forwards it to the base station. (1 = Yes, 0 = No)",
+        " Dist_To_CH":
+            "How far this node is from its Cluster Head, in meters. "
+            "Nodes far from their CH spend more energy to communicate.",
+        " JOIN_S":
+            "Did this node send a JOIN request to join a cluster this round? "
+            "Normal nodes send exactly one. Flooding attackers may send many. (1 = Yes, 0 = No)",
+        " SCH_R":
+            "Did this node receive a time-slot schedule from its Cluster Head? "
+            "Without a schedule, the node cannot send data in an orderly way. (1 = Yes, 0 = No)",
+        "Rank":
+            "The node's priority rank inside its cluster (0 = highest priority, 99 = lowest). "
+            "An unusually high rank may indicate a large or abnormal cluster.",
+        " DATA_S":
+            "Total number of data packets this node has sent this round. "
+            "Attackers often send far more packets than normal nodes.",
+        " DATA_R":
+            "Total data packets this node has received. "
+            "A very high count can signal a flooding or blackhole attack nearby.",
+        " dist_CH_To_BS":
+            "Distance from this node's Cluster Head to the central Base Station (meters). "
+            "Longer distances require more energy per transmission round.",
+        " send_code ":
+            "Protocol message type being sent (0–15). "
+            "Different codes represent JOIN, scheduling, data, and other control messages.",
+    }
+
     inputs = {}
     for feat in sel_feats:
         lo, hi, default, step = feat_ranges[feat]
         label = feat_display.get(feat, feat.strip())
+        help_txt = feat_help.get(feat, "")
         if hi == 1 and lo == 0 and isinstance(step, int):
-            inputs[feat] = st.selectbox(label, [0, 1], index=int(default))
+            inputs[feat] = st.selectbox(label, [0, 1], index=int(default), help=help_txt)
         elif isinstance(step, float):
             inputs[feat] = st.number_input(
                 label,
@@ -371,14 +416,15 @@ with st.sidebar:
                 max_value=float(hi),
                 value=float(default),
                 step=step,
+                help=help_txt,
             )
         else:
             inputs[feat] = st.slider(
-                label, int(lo), int(hi), int(default), step=int(step)
+                label, int(lo), int(hi), int(default), step=int(step), help=help_txt
             )
 
     st.divider()
-    analyse_btn = st.button("🔍  Analyse Threat", use_container_width=True)
+    analyse_btn = st.button("🔍  Analyse Threat", width="stretch")
 
 
 # Main content
@@ -388,9 +434,9 @@ if not analyse_btn:
         st.markdown('<div class="section-title">About</div>', unsafe_allow_html=True)
         st.markdown(
             """
-        <div class="ids-card normal">
-          <b>How to use</b><br>
-          <ol style="margin:.6rem 0 0 1rem;padding:0;font-size:.88rem;line-height:1.8;">
+        <div class="ids-card normal" style="color:#1C1C1C;">
+          <b style="color:#1B4332;">How to use</b><br>
+          <ol style="margin:.6rem 0 0 1rem;padding:0;font-size:.88rem;line-height:1.8;color:#1C1C1C;">
             <li>Select a model from the sidebar</li>
             <li>Choose LIME or SHAP explainability</li>
             <li>Set node parameters (feature values)</li>
@@ -429,11 +475,11 @@ model = loaded_models[selected_model]
 input_df = pd.DataFrame([inputs], columns=sel_feats)
 input_scaled = scaler_app.transform(input_df)
 
-y_pred_enc = model.predict(input_scaled)[0]
-y_pred_label = encoder.inverse_transform([y_pred_enc])[0]
-proba = model.predict_proba(input_scaled)[0]
-confidence = proba[y_pred_enc] * 100
-is_attack = y_pred_label != "Normal"
+y_pred_label = model.predict(input_scaled)[0]          # string label directly
+proba        = model.predict_proba(input_scaled)[0]
+pred_class_idx = list(model.classes_).index(y_pred_label)
+confidence   = proba[pred_class_idx] * 100
+is_attack    = y_pred_label != "Normal"
 
 card_cls = "attack" if is_attack else "normal"
 badge_cls = "badge-attack" if is_attack else "badge-normal"
@@ -467,8 +513,8 @@ with col_conf:
     st.markdown(
         '<div class="section-title">Class Probabilities</div>', unsafe_allow_html=True
     )
-    fig_conf = conf_bar_chart(proba, class_names, y_pred_enc)
-    st.pyplot(fig_conf, use_container_width=True)
+    fig_conf = conf_bar_chart(proba, class_names, pred_class_idx)
+    st.pyplot(fig_conf, width="stretch")
     plt.close(fig_conf)
 
 st.divider()
@@ -487,7 +533,7 @@ with st.spinner(f"Computing {xai_method} explanation…"):
             bg_data,
             [f.strip() for f in sel_feats],
             class_names,
-            int(y_pred_enc),
+            int(pred_class_idx),
         )
     else:
         xai_fig, xai_err = run_shap(
@@ -496,6 +542,7 @@ with st.spinner(f"Computing {xai_method} explanation…"):
             bg_data,
             sel_feats,
             selected_model,
+            pred_class_idx,
         )
 
 if xai_err:
@@ -504,7 +551,7 @@ elif xai_fig:
     col_xai, col_spacer = st.columns([1.4, 0.6])
     with col_xai:
         st.markdown('<div class="ids-card">', unsafe_allow_html=True)
-        st.pyplot(xai_fig, use_container_width=True)
+        st.pyplot(xai_fig, width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
         plt.close(xai_fig)
     with col_spacer:
@@ -534,4 +581,4 @@ with st.expander("📋 Input Parameters", expanded=False):
                 "Scaled Value": round(float(input_scaled[0][sel_feats.index(feat)]), 4),
             }
         )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
