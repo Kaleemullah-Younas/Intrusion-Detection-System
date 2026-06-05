@@ -22,7 +22,6 @@ This repository contains the implementation and evaluation of an Intrusion Detec
    * Model Comparison & Selection
 8. [Results & Comparison](#results--comparison)
 9. [Contributing](#contributing)
-10. [License](#license)
 
 ---
 
@@ -155,7 +154,3 @@ Contributions, issues, and feature requests are welcome! Please follow these ste
 3. Commit your changes: `git commit -m 'Add YourFeature'`
 4. Push to the branch: `git push origin feature/YourFeature`
 5. Submit a pull request
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
